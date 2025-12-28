@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>API Diff Checker</title>
+    <link rel="stylesheet" href="style.css" />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="app-container">
+      <header>
+        <div class="logo">
+          <div class="logo-icon">
+            <svg
+              viewBox="0 0 24 24"
+              width="28"
+              height="28"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 3v18"></path>
+              <path d="m8 8-4 4 4 4"></path>
+              <path d="m16 16 4-4-4-4"></path>
+            </svg>
+          </div>
+          <div>
+            <h1>API Diff Checker</h1>
+            <p class="tagline">Compare API responses across versions</p>
+          </div>
+        </div>
+      </header>
+
+      <main>
+        <!-- Configuration Panel -->
+        <section class="config-section">
+          <div class="config-card">
+            <div class="card-header">
+              <div class="card-icon versions-icon">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <path d="M6 3v18" />
+                  <path d="M18 3v18" />
+                  <path d="M6 8h12" />
+                  <path d="M6 16h12" />
+                </svg>
+              </div>
+              <h2>API Versions</h2>
+              <button id="add-version-btn" class="add-btn" title="Add Version">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+            </div>
+            <div id="versions-container" class="items-list"></div>
+          </div>
+
+          <div class="config-card">
+            <div class="card-header">
+              <div class="card-icon commands-icon">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="20"
+                  height="20"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <polyline points="4 17 10 11 4 5" />
+                  <line x1="12" y1="19" x2="20" y2="19" />
+                </svg>
+              </div>
+              <h2>Commands</h2>
+              <button id="add-command-btn" class="add-btn" title="Add Command">
+                <svg
+                  viewBox="0 0 24 24"
+                  width="16"
+                  height="16"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
+                  <line x1="12" y1="5" x2="12" y2="19" />
+                  <line x1="5" y1="12" x2="19" y2="12" />
+                </svg>
+              </button>
+            </div>
+            <div id="commands-container" class="items-list"></div>
+            <p class="helper-text">
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 16v-4" />
+                <path d="M12 8h.01" />
+              </svg>
+              Use <code>{{BASE_URL}}</code> placeholder — it will be replaced
+              with each version's URL
+            </p>
+          </div>
+        </section>
+
+        <!-- Options -->
+        <div class="options-bar">
+          <label class="toggle-option">
+            <input type="checkbox" id="keys-only-toggle" />
+            <span class="toggle-switch"></span>
+            <span class="toggle-label">
+              <strong>Keys Only</strong>
+              <small>Compare JSON structure only, ignore values</small>
+            </span>
+          </label>
+        </div>
+
+        <button id="run-btn" class="run-btn">
+          <span class="btn-content">
+            <svg
+              viewBox="0 0 24 24"
+              width="20"
+              height="20"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <polygon points="5 3 19 12 5 21 5 3" />
+            </svg>
+            <span>Run Comparison</span>
+          </span>
+          <div class="spinner"></div>
+        </button>
+
+        <!-- Results Panel -->
+        <section id="results-panel" class="results-section hidden">
+          <div class="results-header">
+            <h2>
+              <svg
+                viewBox="0 0 24 24"
+                width="22"
+                height="22"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path
+                  d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
+                />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="9" y1="15" x2="15" y2="15" />
+              </svg>
+              Comparison Results
+            </h2>
+            <div id="results-summary" class="results-summary"></div>
+          </div>
+          <div id="results-container"></div>
+        </section>
+      </main>
+    </div>
+
+    <!-- Templates -->
+    <template id="version-item-template">
+      <div class="item-row version-row">
+        <div class="version-badge">V</div>
+        <input
+          type="text"
+          class="version-name"
+          placeholder="Version name (e.g. prod, staging)"
+          required
+        />
+        <div class="input-separator">→</div>
+        <input
+          type="text"
+          class="version-url"
+          placeholder="https://api.example.com/endpoint"
+          required
+        />
+        <button class="remove-btn" title="Remove">
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+    </template>
+
+    <template id="command-item-template">
+      <div class="item-row command-row">
+        <div class="command-badge">$</div>
+        <textarea
+          class="command-input"
+          placeholder="curl {{BASE_URL}} -H 'Content-Type: application/json'"
+          rows="2"
+          required
+        ></textarea>
+        <button class="remove-btn" title="Remove">
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <line x1="18" y1="6" x2="6" y2="18" />
+            <line x1="6" y1="6" x2="18" y2="18" />
+          </svg>
+        </button>
+      </div>
+    </template>
+
+    <script src="app.js"></script>
+  </body>
+</html>

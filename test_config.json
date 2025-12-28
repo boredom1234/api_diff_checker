@@ -1,0 +1,10 @@
+{
+  "versions": {
+    "v1": "https://jsonplaceholder.typicode.com",
+    "v2": "https://jsonplaceholder.typicode.com"
+  },
+  "commands": [
+    "curl -X GET {{BASE_URL}}/todos/1",
+    "curl -X GET {{BASE_URL}}/todos/2"
+  ]
+}
