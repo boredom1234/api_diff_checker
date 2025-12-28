@@ -1,47 +1,187 @@
+// State - global so functions can access it
+let testCases = [];
+let columns = ["Test A", "Test B"]; // Default columns
+
 document.addEventListener("DOMContentLoaded", () => {
-  // Initialize with sample data
-  addVersion("v1", "");
-  addVersion("v2", "");
-  addCommand("curl {{BASE_URL}}");
+  // Initialize with sample data (one row)
+  addTestCase("Scenario 1", {});
 
   // Event Listeners
   document
-    .getElementById("add-version-btn")
-    .addEventListener("click", () => addVersion());
+    .getElementById("add-column-btn")
+    .addEventListener("click", () => addColumn());
   document
-    .getElementById("add-command-btn")
-    .addEventListener("click", () => addCommand());
+    .getElementById("add-testcase-btn")
+    .addEventListener("click", () => addTestCase());
   document.getElementById("run-btn").addEventListener("click", runCheck);
 
   // Event Delegation for remove buttons
   document.addEventListener("click", (e) => {
-    if (e.target.closest(".remove-btn")) {
-      const row = e.target.closest(".item-row");
-      row.style.animation = "slideOut 0.2s ease-out forwards";
-      setTimeout(() => row.remove(), 200);
+    // Handle test case row removal
+    if (e.target.closest(".remove-testcase-btn")) {
+      const row = e.target.closest("tr.testcase-row");
+      if (row) {
+        const idx = parseInt(row.dataset.index);
+        testCases.splice(idx, 1);
+        renderTestCasesTable();
+      }
+    }
+    // Handle column removal
+    if (e.target.closest(".remove-col-btn")) {
+      const idx = parseInt(e.target.closest(".remove-col-btn").dataset.index);
+      if (columns.length <= 2) {
+        alert("At least 2 columns are required for comparison.");
+        return;
+      }
+
+      // Remove data for this column from all test cases
+      const colName = columns[idx];
+      testCases.forEach((tc) => {
+        delete tc.commands[colName];
+      });
+
+      columns.splice(idx, 1);
+      renderTestCasesTable();
+    }
+  });
+
+  // Listen for column name changes
+  document.addEventListener("input", (e) => {
+    if (e.target.classList.contains("column-header-input")) {
+      const idx = parseInt(e.target.dataset.index);
+      const oldName = columns[idx];
+      const newName = e.target.value.trim();
+
+      if (newName && newName !== oldName) {
+        // Update all test cases to use new key
+        testCases.forEach((tc) => {
+          if (tc.commands[oldName]) {
+            tc.commands[newName] = tc.commands[oldName];
+            delete tc.commands[oldName];
+          }
+        });
+        columns[idx] = newName;
+      }
+    }
+
+    // Save test case command changes
+    if (e.target.classList.contains("testcase-command")) {
+      const row = e.target.closest("tr.testcase-row");
+      const idx = parseInt(row.dataset.index);
+      const colName = e.target.dataset.column;
+      if (testCases[idx]) {
+        testCases[idx].commands[colName] = e.target.value;
+      }
+    }
+    // Save test case name changes
+    if (e.target.classList.contains("testcase-name")) {
+      const row = e.target.closest("tr.testcase-row");
+      const idx = parseInt(row.dataset.index);
+      if (testCases[idx]) {
+        testCases[idx].name = e.target.value;
+      }
     }
   });
 });
 
-function addVersion(name = "", url = "") {
-  const container = document.getElementById("versions-container");
-  const template = document.getElementById("version-item-template");
-  const clone = template.content.cloneNode(true);
-
-  if (name) clone.querySelector(".version-name").value = name;
-  if (url) clone.querySelector(".version-url").value = url;
-
-  container.appendChild(clone);
+function addColumn(name = "") {
+  const newName = name || `Test ${String.fromCharCode(65 + columns.length)}`; // A, B, C...
+  columns.push(newName);
+  renderTestCasesTable();
 }
 
-function addCommand(cmd = "") {
-  const container = document.getElementById("commands-container");
-  const template = document.getElementById("command-item-template");
-  const clone = template.content.cloneNode(true);
+function addTestCase(name = "", commands = {}) {
+  const newTestCase = {
+    name: name || `Scenario ${testCases.length + 1}`,
+    commands: {},
+  };
 
-  if (cmd) clone.querySelector(".command-input").value = cmd;
+  // Initialize commands for all current columns
+  columns.forEach((col) => {
+    newTestCase.commands[col] = commands[col] || "";
+  });
 
-  container.appendChild(clone);
+  testCases.push(newTestCase);
+  renderTestCasesTable();
+}
+
+function renderTestCasesTable() {
+  const container = document.getElementById("testcases-container");
+
+  let html = `
+    <table class="testcases-table">
+      <thead>
+        <tr>
+          <th class="tc-name-col">Scenario Name</th>
+          ${columns
+            .map(
+              (col, idx) =>
+                `<th class="tc-cmd-col">
+                    <div class="column-header">
+                        <input type="text" class="column-header-input" data-index="${idx}" value="${escapeHtml(
+                  col
+                )}" placeholder="Column Name">
+                        <button class="remove-col-btn" data-index="${idx}" title="Remove Column">×</button>
+                    </div>
+                </th>`
+            )
+            .join("")}
+          <th class="tc-action-col"></th>
+        </tr>
+      </thead>
+      <tbody>
+  `;
+
+  if (testCases.length === 0) {
+    html += `
+      <tr>
+        <td colspan="${columns.length + 2}" class="empty-row">
+          No rows yet. Click "Add Row" to start.
+        </td>
+      </tr>
+    `;
+  } else {
+    testCases.forEach((tc, idx) => {
+      html += `
+        <tr class="testcase-row" data-index="${idx}">
+          <td class="tc-name-cell">
+            <input type="text" class="testcase-name" value="${escapeHtml(
+              tc.name
+            )}" placeholder="Scenario name" />
+          </td>
+          ${columns
+            .map(
+              (col) => `
+            <td class="tc-cmd-cell">
+              <textarea 
+                class="testcase-command" 
+                data-column="${escapeHtml(col)}"
+                placeholder="curl https://api..."
+                rows="3"
+              >${escapeHtml(tc.commands[col] || "")}</textarea>
+            </td>
+          `
+            )
+            .join("")}
+          <td class="tc-action-cell">
+            <button class="remove-testcase-btn" title="Remove Row">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18" />
+                <line x1="6" y1="6" x2="18" y2="18" />
+              </svg>
+            </button>
+          </td>
+        </tr>
+      `;
+    });
+  }
+
+  html += `
+      </tbody>
+    </table>
+  `;
+
+  container.innerHTML = html;
 }
 
 async function runCheck() {
@@ -50,31 +190,46 @@ async function runCheck() {
   const resultsContainer = document.getElementById("results-container");
   const resultsSummary = document.getElementById("results-summary");
 
-  // Gather data
-  const versions = {};
-  document.querySelectorAll(".version-row").forEach((item) => {
-    const name = item.querySelector(".version-name").value.trim();
-    const url = item.querySelector(".version-url").value.trim();
-    if (name && url) versions[name] = url;
-  });
-
-  const commands = [];
-  document.querySelectorAll(".command-row").forEach((item) => {
-    const cmd = item.querySelector(".command-input").value.trim();
-    if (cmd) commands.push(cmd);
-  });
-
-  if (Object.keys(versions).length < 2) {
-    alert("Please provide at least 2 versions to compare.");
+  // Validate inputs
+  if (columns.length < 2) {
+    alert("At least 2 columns are required to compare.");
     return;
   }
-  if (commands.length === 0) {
-    alert("Please provide at least one command.");
+
+  // Construct dummy versions map to satisfy backend validation
+  // Since users paste full curl commands, the BaseUrl is technically not needed
+  // IF they don't use the {{BASE_URL}} placeholder.
+  // We provide a dummy URL just in case.
+  const versions = {};
+  columns.forEach((col) => {
+    versions[col] = "http://placeholder-required-by-backend.com";
+  });
+
+  // Gather test cases data (re-read from DOM to get latest)
+  const test_cases = [];
+  document.querySelectorAll(".testcase-row").forEach((row) => {
+    const idx = parseInt(row.dataset.index);
+    const name = row.querySelector(".testcase-name").value.trim();
+    const commands = {};
+    row.querySelectorAll(".testcase-command").forEach((textarea) => {
+      const col = textarea.dataset.column;
+      const cmd = textarea.value.trim();
+      if (cmd) commands[col] = cmd;
+    });
+
+    // Only add if there's at least one command
+    if (Object.keys(commands).length > 0) {
+      test_cases.push({ name: name || `Scenario ${idx + 1}`, commands });
+    }
+  });
+
+  if (test_cases.length === 0) {
+    alert("Please provide at least one row with commands.");
     return;
   }
 
   const keysOnly = document.getElementById("keys-only-toggle").checked;
-  const config = { versions, commands, keys_only: keysOnly };
+  const config = { versions, test_cases, keys_only: keysOnly };
 
   // Set loading state
   runBtn.classList.add("loading");
@@ -153,15 +308,30 @@ function renderResults(data) {
     // Header
     const header = document.createElement("div");
     header.className = "result-card-header";
+    const displayName = res.test_case_name || "Unknown Scenario";
     header.innerHTML = `
-            <div class="command-preview">${escapeHtml(
-              truncateCommand(res.command)
-            )}</div>
+            <div class="command-preview">${escapeHtml(displayName)}</div>
             <div class="status-pill ${statusClass}">
                 <span>${statusIcon}</span>
                 <span>${statusText}</span>
             </div>
         `;
+
+    // Show commands per version/column
+    if (res.commands && Object.keys(res.commands).length > 0) {
+      const cmdsDiv = document.createElement("div");
+      cmdsDiv.className = "commands-list";
+      Object.entries(res.commands).forEach(([col, cmd]) => {
+        const cmdItem = document.createElement("div");
+        cmdItem.className = "command-item";
+        cmdItem.innerHTML = `
+          <span class="version-tag">${escapeHtml(col)}</span>
+          <code>${escapeHtml(truncateCommand(cmd))}</code>
+        `;
+        cmdsDiv.appendChild(cmdItem);
+      });
+      header.appendChild(cmdsDiv);
+    }
 
     // Body
     const body = document.createElement("div");
@@ -171,7 +341,7 @@ function renderResults(data) {
       const block = document.createElement("div");
       block.className = "comparison-block";
 
-      // Version comparison header
+      // Comparison header
       const compHeader = document.createElement("div");
       compHeader.className = "comparison-header";
       compHeader.innerHTML = `
@@ -222,7 +392,7 @@ function renderResults(data) {
               <div class="diff-panel-header">
                 <span class="dot"></span>
                 <span>${escapeHtml(diff.version_a)}</span>
-                <span class="panel-label">OLD</span>
+                <span class="panel-label">LEFT</span>
               </div>
               <div class="diff-content">${highlightJson(diff.old_content)}</div>
             `;
@@ -234,7 +404,7 @@ function renderResults(data) {
               <div class="diff-panel-header">
                 <span class="dot"></span>
                 <span>${escapeHtml(diff.version_b)}</span>
-                <span class="panel-label">NEW</span>
+                <span class="panel-label">RIGHT</span>
               </div>
               <div class="diff-content">${highlightJson(diff.new_content)}</div>
             `;
@@ -266,44 +436,6 @@ function renderResults(data) {
       }
       body.appendChild(block);
     });
-
-    // Execution info
-    if (res.execution_info && res.execution_info.length > 0) {
-      const execInfo = document.createElement("div");
-      execInfo.className = "exec-info";
-      execInfo.innerHTML =
-        '<div class="exec-info-title">Execution Details</div>';
-
-      res.execution_info.forEach((info) => {
-        const item = document.createElement("div");
-        item.className = "exec-item";
-
-        const statusClass = info.error ? "error" : "success";
-        const statusIcon = info.error
-          ? '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg>'
-          : '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>';
-
-        const statusText = info.error ? `Failed: ${info.error}` : `Saved`;
-
-        item.innerHTML = `
-                    <span class="exec-version">[${escapeHtml(
-                      info.version
-                    )}]</span>
-                    <span class="exec-status ${statusClass}">${statusIcon} ${escapeHtml(
-          statusText
-        )}</span>
-                    ${
-                      info.file
-                        ? `<span class="exec-file">${escapeHtml(
-                            info.file
-                          )}</span>`
-                        : ""
-                    }
-                `;
-        execInfo.appendChild(item);
-      });
-      body.appendChild(execInfo);
-    }
 
     card.appendChild(header);
     card.appendChild(body);
@@ -388,6 +520,7 @@ function formatUnifiedDiff(text) {
 }
 
 function truncateCommand(cmd) {
+  if (!cmd) return "";
   const normalized = cmd.replace(/\s+/g, " ").trim();
   return normalized.length > 80
     ? normalized.substring(0, 80) + "..."
@@ -403,13 +536,3 @@ function escapeHtml(text) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
-
-// Add slideOut animation
-const style = document.createElement("style");
-style.textContent = `
-    @keyframes slideOut {
-        from { opacity: 1; transform: translateX(0); }
-        to { opacity: 0; transform: translateX(-20px); }
-    }
-`;
-document.head.appendChild(style);

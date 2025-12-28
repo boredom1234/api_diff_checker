@@ -29,9 +29,11 @@ type RunResult struct {
 }
 
 type CommandResult struct {
-	Command  string        `json:"command"`
-	Diffs    []VersionDiff `json:"diffs"`
-	ExecInfo []ExecInfo    `json:"execution_info"` // Version -> FilePath/Exec details
+	TestCaseName string            `json:"test_case_name"`    // Name of the test case
+	Commands     map[string]string `json:"commands"`          // Version -> command mapping
+	Command      string            `json:"command,omitempty"` // Legacy: single command (kept for backward compat)
+	Diffs        []VersionDiff     `json:"diffs"`
+	ExecInfo     []ExecInfo        `json:"execution_info"` // Version -> FilePath/Exec details
 }
 
 type ExecInfo struct {
@@ -84,13 +86,16 @@ func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunRe
 	}
 	sort.Strings(versions)
 
+	// Get normalized test cases (handles both new and legacy formats)
+	testCases := cfg.GetTestCases()
+
 	runResult := &RunResult{
-		CommandResults: make([]CommandResult, len(cfg.Commands)),
+		CommandResults: make([]CommandResult, len(testCases)),
 	}
 
 	timeout := cfg.GetTimeout()
 
-	for cmdIdx, cmdRaw := range cfg.Commands {
+	for tcIdx, testCase := range testCases {
 		// Check if context is cancelled
 		select {
 		case <-ctx.Done():
@@ -100,10 +105,11 @@ func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunRe
 		}
 
 		cmdRes := CommandResult{
-			Command: cmdRaw,
+			TestCaseName: testCase.Name,
+			Commands:     testCase.Commands,
 		}
 
-		fmt.Printf("\n--- Executing Command: %s ---\n", cmdRaw)
+		fmt.Printf("\n--- Executing Test Case: %s ---\n", testCase.Name)
 
 		// Use channel to collect results from goroutines (avoid race condition)
 		resultChan := make(chan execResult, len(versions))
@@ -111,9 +117,17 @@ func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunRe
 
 		for _, vName := range versions {
 			baseURL := cfg.Versions[vName]
+			// Get the command for this specific version
+			cmdForVersion, ok := testCase.Commands[vName]
+			if !ok {
+				// Version not in this test case, skip
+				fmt.Printf("[WARN] Test case '%s' has no command for version '%s', skipping\n", testCase.Name, vName)
+				continue
+			}
+
 			wg.Add(1)
 
-			go func(v, url string) {
+			go func(v, url, cmdRaw string) {
 				defer wg.Done()
 
 				// Panic recovery
@@ -166,7 +180,7 @@ func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunRe
 				}
 
 				resultChan <- result
-			}(vName, baseURL)
+			}(vName, baseURL, cmdForVersion)
 		}
 
 		// Wait for all goroutines to complete
@@ -225,7 +239,7 @@ func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunRe
 			}
 		}
 
-		runResult.CommandResults[cmdIdx] = cmdRes
+		runResult.CommandResults[tcIdx] = cmdRes
 	}
 
 	return runResult, nil
