@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sync"
 	"time"
 )
@@ -38,12 +39,70 @@ type ExecutionRecord struct {
 }
 
 func NewStore(baseDir string) *Store {
-	return &Store{
+	s := &Store{
 		BaseDir: baseDir,
 		Index: Index{
 			Commands: []CommandEntry{},
 		},
 	}
+
+	// Load existing index if present
+	if err := s.LoadIndex(); err != nil {
+		// Log but continue - we'll create a fresh index
+		fmt.Printf("[WARN] Could not load existing index: %v\n", err)
+	}
+
+	return s
+}
+
+// LoadIndex loads the index from disk
+func (s *Store) LoadIndex() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	indexPath := filepath.Join(s.BaseDir, "index.json")
+	data, err := os.ReadFile(indexPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// No existing index, that's fine
+			return nil
+		}
+		return fmt.Errorf("failed to read index: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &s.Index); err != nil {
+		return fmt.Errorf("failed to parse index: %w", err)
+	}
+
+	return nil
+}
+
+// sanitizeFilename removes or replaces characters that are invalid in filenames
+func sanitizeFilename(name string) string {
+	// Replace problematic characters with underscores
+	re := regexp.MustCompile(`[<>:"/\\|?*\x00-\x1f]`)
+	sanitized := re.ReplaceAllString(name, "_")
+
+	// Replace spaces with underscores
+	sanitized = regexp.MustCompile(`\s+`).ReplaceAllString(sanitized, "_")
+
+	// Collapse multiple underscores
+	sanitized = regexp.MustCompile(`_+`).ReplaceAllString(sanitized, "_")
+
+	// Trim underscores from ends
+	sanitized = regexp.MustCompile(`^_+|_+$`).ReplaceAllString(sanitized, "")
+
+	// Ensure it's not empty
+	if sanitized == "" {
+		sanitized = "unnamed"
+	}
+
+	// Limit length
+	if len(sanitized) > 50 {
+		sanitized = sanitized[:50]
+	}
+
+	return sanitized
 }
 
 func (s *Store) SaveResponse(command, version string, response []byte, execErr error) (string, error) {
@@ -54,42 +113,46 @@ func (s *Store) SaveResponse(command, version string, response []byte, execErr e
 	timestamp := time.Now()
 	tsStr := timestamp.Format("20060102T150405")
 
-	// 1. Create filename
-	// v<version>_<command-hash>_<timestamp>.json
-	// Clean version for filename
-	safeVer := version // validation could be added
+	// Sanitize version for filename
+	safeVer := sanitizeFilename(version)
 	filename := fmt.Sprintf("v%s_%s_%s.json", safeVer, cmdHash[:8], tsStr)
 	filePath := filepath.Join(s.BaseDir, filename)
 
-	// Ensure dir exists
-	if _, err := os.Stat(s.BaseDir); os.IsNotExist(err) {
-		os.MkdirAll(s.BaseDir, 0755)
+	// Ensure dir exists with proper error handling
+	if err := os.MkdirAll(s.BaseDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
 	execRecord := ExecutionRecord{
 		Version:   version,
 		Timestamp: timestamp,
-
-		Status: "success",
+		Status:    "success",
 	}
 
 	if execErr != nil {
 		execRecord.Status = "error"
 		execRecord.Error = execErr.Error()
-	} else {
+	} else if response != nil {
 		// Pretty print JSON
 		var prettyJSON bytes.Buffer
 		if err := json.Indent(&prettyJSON, response, "", "  "); err == nil {
-			os.WriteFile(filePath, prettyJSON.Bytes(), 0644)
+			if writeErr := os.WriteFile(filePath, prettyJSON.Bytes(), 0644); writeErr != nil {
+				return "", fmt.Errorf("failed to write response file: %w", writeErr)
+			}
 		} else {
-			// Save raw if not json
-			os.WriteFile(filePath, response, 0644)
+			// Save raw if not JSON
+			if writeErr := os.WriteFile(filePath, response, 0644); writeErr != nil {
+				return "", fmt.Errorf("failed to write response file: %w", writeErr)
+			}
 		}
 		execRecord.ResponseFile = filename
 	}
 
 	s.updateIndex(command, cmdHash, execRecord)
-	s.saveIndex()
+	if err := s.saveIndexLocked(); err != nil {
+		// Log error but don't fail the whole operation
+		fmt.Printf("[WARN] Failed to save index: %v\n", err)
+	}
 
 	return filePath, nil
 }
@@ -113,12 +176,68 @@ func (s *Store) updateIndex(command, hash string, record ExecutionRecord) {
 	}
 }
 
-func (s *Store) saveIndex() {
-	data, _ := json.MarshalIndent(s.Index, "", "  ")
-	os.WriteFile(filepath.Join(s.BaseDir, "index.json"), data, 0644)
+// saveIndexLocked saves the index to disk (must be called with mutex held)
+func (s *Store) saveIndexLocked() error {
+	data, err := json.MarshalIndent(s.Index, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal index: %w", err)
+	}
+
+	indexPath := filepath.Join(s.BaseDir, "index.json")
+	if err := os.WriteFile(indexPath, data, 0644); err != nil {
+		return fmt.Errorf("failed to write index: %w", err)
+	}
+
+	return nil
+}
+
+// SaveIndex is a public method to force saving the index
+func (s *Store) SaveIndex() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveIndexLocked()
 }
 
 func hash(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
+}
+
+// GetResponsePath returns the full path for a response file
+func (s *Store) GetResponsePath(filename string) string {
+	return filepath.Join(s.BaseDir, filename)
+}
+
+// CleanOldResponses removes response files older than the specified duration
+func (s *Store) CleanOldResponses(maxAge time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	cleaned := 0
+
+	entries, err := os.ReadDir(s.BaseDir)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read storage directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == "index.json" {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		if info.ModTime().Before(cutoff) {
+			filePath := filepath.Join(s.BaseDir, entry.Name())
+			if err := os.Remove(filePath); err == nil {
+				cleaned++
+			}
+		}
+	}
+
+	return cleaned, nil
 }

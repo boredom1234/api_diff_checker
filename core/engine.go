@@ -1,10 +1,12 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"api_diff_checker/comparator"
 	"api_diff_checker/config"
@@ -13,6 +15,9 @@ import (
 	"api_diff_checker/storage"
 )
 
+// DefaultTimeout for the entire run operation
+const DefaultRunTimeout = 10 * time.Minute
+
 type Engine struct {
 	Store  *storage.Store
 	Logger *logger.Logger
@@ -20,6 +25,7 @@ type Engine struct {
 
 type RunResult struct {
 	CommandResults []CommandResult `json:"command_results"`
+	Errors         []string        `json:"errors,omitempty"` // Aggregated non-fatal errors
 }
 
 type CommandResult struct {
@@ -29,9 +35,10 @@ type CommandResult struct {
 }
 
 type ExecInfo struct {
-	Version string `json:"version"`
-	File    string `json:"file"`
-	Error   string `json:"error,omitempty"`
+	Version  string `json:"version"`
+	File     string `json:"file"`
+	Error    string `json:"error,omitempty"`
+	TimedOut bool   `json:"timed_out,omitempty"`
 }
 
 type VersionDiff struct {
@@ -50,7 +57,26 @@ func NewEngine(store *storage.Store, l *logger.Logger) *Engine {
 	}
 }
 
+// execResult is used for collecting results from goroutines via channel
+type execResult struct {
+	version  string
+	filePath string
+	execInfo ExecInfo
+	err      error
+}
+
 func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
+	return e.RunWithContext(context.Background(), cfg)
+}
+
+func (e *Engine) RunWithContext(ctx context.Context, cfg *config.Config) (*RunResult, error) {
+	// Apply overall timeout if context doesn't have one
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, DefaultRunTimeout)
+		defer cancel()
+	}
+
 	// Sorted versions for consistency
 	var versions []string
 	for v := range cfg.Versions {
@@ -62,16 +88,25 @@ func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
 		CommandResults: make([]CommandResult, len(cfg.Commands)),
 	}
 
+	timeout := cfg.GetTimeout()
+
 	for cmdIdx, cmdRaw := range cfg.Commands {
+		// Check if context is cancelled
+		select {
+		case <-ctx.Done():
+			runResult.Errors = append(runResult.Errors, fmt.Sprintf("operation cancelled: %v", ctx.Err()))
+			return runResult, ctx.Err()
+		default:
+		}
+
 		cmdRes := CommandResult{
 			Command: cmdRaw,
 		}
 
 		fmt.Printf("\n--- Executing Command: %s ---\n", cmdRaw)
 
-		// Map: Version -> FilePath (for internal comparison use)
-		results := make(map[string]string)
-		var mu sync.Mutex
+		// Use channel to collect results from goroutines (avoid race condition)
+		resultChan := make(chan execResult, len(versions))
 		var wg sync.WaitGroup
 
 		for _, vName := range versions {
@@ -81,8 +116,30 @@ func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
 			go func(v, url string) {
 				defer wg.Done()
 
-				res, err := executor.Execute(cmdRaw, v, url)
-				execInfo := ExecInfo{Version: v}
+				// Panic recovery
+				defer func() {
+					if r := recover(); r != nil {
+						errMsg := fmt.Sprintf("panic during execution: %v", r)
+						e.Logger.Log(logger.LogEntry{
+							Level: "ERROR", Version: v, Command: cmdRaw,
+							Message: "Panic recovered", ErrorDetails: errMsg,
+						})
+						resultChan <- execResult{
+							version: v,
+							execInfo: ExecInfo{
+								Version: v,
+								Error:   errMsg,
+							},
+							err: fmt.Errorf(errMsg),
+						}
+					}
+				}()
+
+				res, err := executor.Execute(cmdRaw, v, url, timeout)
+				result := execResult{
+					version:  v,
+					execInfo: ExecInfo{Version: v, TimedOut: res != nil && res.TimedOut},
+				}
 
 				if err != nil {
 					e.Logger.Log(logger.LogEntry{
@@ -90,28 +147,40 @@ func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
 						Message: "Execution failed", ErrorDetails: err.Error(),
 					})
 					_, _ = e.Store.SaveResponse(cmdRaw, v, nil, err)
-					execInfo.Error = err.Error()
+					result.execInfo.Error = err.Error()
+					if res != nil && res.TimedOut {
+						result.execInfo.Error = fmt.Sprintf("timeout after %s", timeout)
+					}
+					result.err = err
 				} else {
 					path, saveErr := e.Store.SaveResponse(cmdRaw, v, res.Response, nil)
 					if saveErr != nil {
 						e.Logger.Log(logger.LogEntry{Level: "ERROR", Version: v, Message: "Failed to save response", ErrorDetails: saveErr.Error()})
-						execInfo.Error = "Save failed: " + saveErr.Error()
+						result.execInfo.Error = "Save failed: " + saveErr.Error()
+						result.err = saveErr
 					} else {
 						e.Logger.Log(logger.LogEntry{Level: "INFO", Version: v, Command: cmdRaw, Message: "Response saved", ErrorDetails: path})
-						execInfo.File = path
-
-						mu.Lock()
-						results[v] = path
-						mu.Unlock()
+						result.execInfo.File = path
+						result.filePath = path
 					}
 				}
 
-				mu.Lock()
-				cmdRes.ExecInfo = append(cmdRes.ExecInfo, execInfo)
-				mu.Unlock()
+				resultChan <- result
 			}(vName, baseURL)
 		}
+
+		// Wait for all goroutines to complete
 		wg.Wait()
+		close(resultChan)
+
+		// Collect results from channel (thread-safe)
+		results := make(map[string]string) // Version -> FilePath
+		for result := range resultChan {
+			cmdRes.ExecInfo = append(cmdRes.ExecInfo, result.execInfo)
+			if result.filePath != "" {
+				results[result.version] = result.filePath
+			}
+		}
 
 		// Sort ExecInfo by version for consistent display
 		sort.Slice(cmdRes.ExecInfo, func(i, j int) bool {
@@ -142,13 +211,18 @@ func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
 						vDiff.NewContent = new
 					}
 				} else {
-					vDiff.Error = "One or both versions failed execution"
+					var missing []string
+					if !ok1 {
+						missing = append(missing, vBase)
+					}
+					if !ok2 {
+						missing = append(missing, vTarget)
+					}
+					vDiff.Error = fmt.Sprintf("failed to get responses for version(s): %s",
+						joinStrings(missing, ", "))
 				}
 				cmdRes.Diffs = append(cmdRes.Diffs, vDiff)
 			}
-		} else {
-			// Single version - nothing to compare
-			// Could maybe compare against previous run? But keeping simple for now.
 		}
 
 		runResult.CommandResults[cmdIdx] = cmdRes
@@ -160,15 +234,18 @@ func (e *Engine) Run(cfg *config.Config) (*RunResult, error) {
 func (e *Engine) compareFiles(file1, file2, v1, v2 string, keysOnly bool) (*comparator.DiffResult, string, string, error) {
 	b1, err := os.ReadFile(file1)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("read file1 error: %v", err)
+		return nil, "", "", fmt.Errorf("read file1 error: %w", err)
 	}
 	b2, err := os.ReadFile(file2)
 	if err != nil {
-		return nil, "", "", fmt.Errorf("read file2 error: %v", err)
+		return nil, "", "", fmt.Errorf("read file2 error: %w", err)
 	}
 
-	if len(b1) == 0 || len(b2) == 0 {
-		return nil, "", "", fmt.Errorf("empty response content")
+	if len(b1) == 0 {
+		return nil, "", "", fmt.Errorf("empty response content for %s", v1)
+	}
+	if len(b2) == 0 {
+		return nil, "", "", fmt.Errorf("empty response content for %s", v2)
 	}
 
 	opts := comparator.CompareOptions{KeysOnly: keysOnly}
@@ -177,4 +254,16 @@ func (e *Engine) compareFiles(file1, file2, v1, v2 string, keysOnly bool) (*comp
 		return nil, "", "", err
 	}
 	return diff, string(b1), string(b2), nil
+}
+
+// joinStrings joins strings with a separator
+func joinStrings(strs []string, sep string) string {
+	if len(strs) == 0 {
+		return ""
+	}
+	result := strs[0]
+	for i := 1; i < len(strs); i++ {
+		result += sep + strs[i]
+	}
+	return result
 }
