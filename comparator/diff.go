@@ -185,14 +185,14 @@ func summarizeKeyDifferences(v1, v2 interface{}) string {
 	// Check for removed keys
 	for k := range keys1 {
 		if _, ok := keys2[k]; !ok {
-			changes = append(changes, fmt.Sprintf("Key '%s' removed", k))
+			changes = append(changes, fmt.Sprintf("Field '%s' removed", k))
 		}
 	}
 
 	// Check for added keys
 	for k := range keys2 {
 		if _, ok := keys1[k]; !ok {
-			changes = append(changes, fmt.Sprintf("Key '%s' added", k))
+			changes = append(changes, fmt.Sprintf("Field '%s' added", k))
 		}
 	}
 
@@ -200,7 +200,7 @@ func summarizeKeyDifferences(v1, v2 interface{}) string {
 	sort.Strings(changes)
 
 	if len(changes) == 0 {
-		return "No structural changes (keys match)"
+		return "No top-level changes"
 	}
 	return strings.Join(changes, ", ")
 }
